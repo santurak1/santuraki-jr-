@@ -1,5 +1,6 @@
 import os
 import sys
+
 __package__ = "trainer"
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
@@ -62,10 +63,10 @@ def train_epoch(epoch, wandb):
 
             optimizer.zero_grad(set_to_none=True)
 
-        if step % args.log_interval == 0:
+        if step % args.log_interval == 0 or step == iter_per_epoch - 1:
             spend_time = time.time() - start_time
             Logger(
-                'Epoch:[{}/{}]({}/{}) loss:{:.3f} lr:{:.12f} epoch_Time:{}min:'.format(
+                'Epoch:[{}/{}]({}/{}) loss:{:.6f} lr:{:.12f} epoch_Time:{}min:'.format(
                     epoch + 1,
                     args.epochs,
                     step,
@@ -79,7 +80,7 @@ def train_epoch(epoch, wandb):
                            "lr": optimizer.param_groups[-1]['lr'],
                            "epoch_Time": spend_time / (step + 1) * iter_per_epoch // 60 - spend_time // 60})
 
-        if (step + 1) % args.save_interval == 0 and (not ddp or dist.get_rank() == 0):
+        if ((step + 1) % args.save_interval == 0 or step == iter_per_epoch - 1) and (not ddp or dist.get_rank() == 0):
             model.eval()
             moe_path = '_moe' if lm_config.use_moe else ''
             ckp = f'{args.save_dir}/pretrain_{lm_config.hidden_size}{moe_path}.pth'
@@ -140,7 +141,8 @@ if __name__ == "__main__":
     parser.add_argument("--data_path", type=str, default="../dataset/pretrain_hq.jsonl")
     args = parser.parse_args()
 
-    lm_config = MiniMindConfig(hidden_size=args.hidden_size, num_hidden_layers=args.num_hidden_layers, use_moe=args.use_moe)
+    lm_config = MiniMindConfig(hidden_size=args.hidden_size, num_hidden_layers=args.num_hidden_layers,
+                               use_moe=args.use_moe)
     args.save_dir = os.path.join(args.out_dir)
     os.makedirs(args.save_dir, exist_ok=True)
     os.makedirs(args.out_dir, exist_ok=True)
@@ -167,7 +169,7 @@ if __name__ == "__main__":
         torch.cuda.manual_seed(base_seed + rank)
 
     if args.use_wandb and (not ddp or ddp_local_rank == 0):
-        import wandb
+        import swanlab as wandb
 
         wandb.init(project=args.wandb_project, name=args.wandb_run_name)
     else:
@@ -181,7 +183,7 @@ if __name__ == "__main__":
         batch_size=args.batch_size,
         pin_memory=True,
         drop_last=False,
-        shuffle=False,
+        shuffle=(train_sampler is None),
         num_workers=args.num_workers,
         sampler=train_sampler
     )
@@ -190,9 +192,10 @@ if __name__ == "__main__":
     optimizer = optim.AdamW(model.parameters(), lr=args.learning_rate)
 
     if ddp:
-        model._ddp_params_and_buffers_to_ignore = {"pos_cis"}
+        model._ddp_params_and_buffers_to_ignore = {"freqs_cos", "freqs_sin"}
         model = DistributedDataParallel(model, device_ids=[ddp_local_rank])
 
     iter_per_epoch = len(train_loader)
     for epoch in range(args.epochs):
+        train_sampler and train_sampler.set_epoch(epoch)
         train_epoch(epoch, wandb)

@@ -63,10 +63,10 @@ def train_epoch(epoch, wandb):
 
             optimizer.zero_grad(set_to_none=True)
 
-        if step % args.log_interval == 0:
+        if step % args.log_interval == 0 or step == iter_per_epoch - 1:
             spend_time = time.time() - start_time
             Logger(
-                'Epoch:[{}/{}]({}/{}) loss:{:.3f} lr:{:.12f} epoch_Time:{}min:'.format(
+                'Epoch:[{}/{}]({}/{}) loss:{:.6f} lr:{:.12f} epoch_Time:{}min:'.format(
                     epoch + 1,
                     args.epochs,
                     step,
@@ -76,11 +76,11 @@ def train_epoch(epoch, wandb):
                     spend_time / (step + 1) * iter_per_epoch // 60 - spend_time // 60))
 
             if (wandb is not None) and (not ddp or dist.get_rank() == 0):
-                wandb.log({"loss": loss * args.accumulation_steps,
+                wandb.log({"loss": loss.item() * args.accumulation_steps,
                            "lr": optimizer.param_groups[-1]['lr'],
                            "epoch_Time": spend_time / (step + 1) * iter_per_epoch // 60 - spend_time // 60})
 
-        if (step + 1) % args.save_interval == 0 and (not ddp or dist.get_rank() == 0):
+        if ((step + 1) % args.save_interval == 0 or step == iter_per_epoch - 1) and (not ddp or dist.get_rank() == 0):
             model.eval()
             moe_path = '_moe' if lm_config.use_moe else ''
             ckp = f'{args.save_dir}/full_sft_{lm_config.hidden_size}{moe_path}.pth'
@@ -170,7 +170,7 @@ if __name__ == "__main__":
         torch.cuda.manual_seed(base_seed + rank)
 
     if args.use_wandb and (not ddp or ddp_local_rank == 0):
-        import wandb
+        import swanlab as wandb
 
         wandb.init(project=args.wandb_project, name=args.wandb_run_name)
     else:
@@ -185,7 +185,7 @@ if __name__ == "__main__":
         batch_size=args.batch_size,
         pin_memory=True,
         drop_last=False,
-        shuffle=False,
+        shuffle=(train_sampler is None),
         num_workers=args.num_workers,
         sampler=train_sampler
     )
@@ -194,9 +194,10 @@ if __name__ == "__main__":
     optimizer = optim.AdamW(model.parameters(), lr=args.learning_rate)
 
     if ddp:
-        model._ddp_params_and_buffers_to_ignore = {"pos_cis"}
+        model._ddp_params_and_buffers_to_ignore = {"freqs_cos", "freqs_sin"}
         model = DistributedDataParallel(model, device_ids=[ddp_local_rank])
 
     iter_per_epoch = len(train_loader)
     for epoch in range(args.epochs):
+        train_sampler and train_sampler.set_epoch(epoch)
         train_epoch(epoch, wandb)
